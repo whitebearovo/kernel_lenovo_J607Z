@@ -123,6 +123,7 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 #define TCP_TIMEWAIT_LEN (60*HZ) /* how long to wait to destroy TIME-WAIT
 				  * state, about 60 seconds	*/
 #define TCP_FIN_TIMEOUT	TCP_TIMEWAIT_LEN
+#define TCP_FIN_TIMEOUT_MAX	(120 * HZ)
                                  /* BSD style FIN_WAIT2 deadlock breaker.
 				  * It used to be 3min, new value is 60sec,
 				  * to combine FIN-WAIT-2 timeout with
@@ -140,6 +141,7 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 #define TCP_RTO_MAX	((unsigned)(120*HZ))
 #define TCP_RTO_MIN	((unsigned)(HZ/5))
 #define TCP_TIMEOUT_MIN	(2U) /* Min timeout for TCP timers in jiffies */
+#define TCP_TIMEOUT_MIN_US	(2*USEC_PER_MSEC) /* Min TCP timeout in microsecs */
 #define TCP_TIMEOUT_INIT ((unsigned)(1*HZ))	/* RFC6298 2.1 initial RTO value	*/
 #define TCP_TIMEOUT_FALLBACK ((unsigned)(3*HZ))	/* RFC 1122 initial RTO value, now
 						 * used as a fallback RTO for the
@@ -361,7 +363,6 @@ extern int tcp_proc_delayed_ack_control(struct ctl_table *table, int write,
 				void __user *buffer, size_t *length,
 				loff_t *ppos);
 
-void tcp_enter_quickack_mode(struct sock *sk, unsigned int max_quickacks);
 static inline void tcp_dec_quickack_mode(struct sock *sk,
 					 const unsigned int pkts)
 {
@@ -802,6 +803,12 @@ static inline u32 tcp_stamp_us_delta(u64 t1, u64 t0)
 static inline u32 tcp_skb_timestamp(const struct sk_buff *skb)
 {
 	return div_u64(skb->skb_mstamp, USEC_PER_SEC / TCP_TS_HZ);
+}
+
+/* provide the departure time in us unit */
+static inline u64 tcp_skb_timestamp_us(const struct sk_buff *skb)
+{
+	return skb->skb_mstamp;
 }
 
 
@@ -1913,12 +1920,12 @@ static inline u32 tcp_notsent_lowat(const struct tcp_sock *tp)
 	return tp->notsent_lowat ?: READ_ONCE(net->ipv4.sysctl_tcp_notsent_lowat);
 }
 
-static inline bool tcp_stream_memory_free(const struct sock *sk)
+static inline bool tcp_stream_memory_free(const struct sock *sk, int wake)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
 	u32 notsent_bytes = READ_ONCE(tp->write_seq) - tp->snd_nxt;
 
-	return notsent_bytes < tcp_notsent_lowat(tp);
+	return (notsent_bytes << wake) < tcp_notsent_lowat(tp);
 }
 
 #ifdef CONFIG_PROC_FS

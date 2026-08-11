@@ -313,6 +313,8 @@ enum rw_hint {
 /* iocb->ki_waitq is valid */
 #define IOCB_WAITQ		(1 << 19)
 #define IOCB_NOIO		(1 << 20)
+/* kiocb is a read or write operation submitted by fs/aio.c. */
+#define IOCB_AIO_RW		(1 << 23)
 
 struct kiocb {
 	struct file		*ki_filp;
@@ -1370,6 +1372,7 @@ extern int send_sigurg(struct fown_struct *fown);
 #define SB_BORN		(1<<29)
 #define SB_ACTIVE	(1<<30)
 #define SB_NOUSER	(1<<31)
+#define SB_I_SKIP_SYNC	0x00000100	/* Skip superblock at global sync */
 
 /* These flags relate to encoding and casefolding */
 #define SB_ENC_STRICT_MODE_FL	(1 << 0)

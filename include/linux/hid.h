@@ -36,6 +36,7 @@
 #include <linux/input.h>
 #include <linux/semaphore.h>
 #include <linux/mutex.h>
+#include <linux/kref.h>
 #include <linux/power_supply.h>
 #include <uapi/linux/hid.h>
 
@@ -628,8 +629,13 @@ struct hid_device {							/* device report descriptor */
 	struct list_head debug_list;
 	spinlock_t  debug_list_lock;
 	wait_queue_head_t debug_wait;
+	struct kref ref;
+
+	unsigned int id;						/* system unique id */
 	bool input_registered;
 };
+
+void hiddev_free(struct kref *ref);
 
 #define to_hid_device(pdev) \
 	container_of(pdev, struct hid_device, dev)
