@@ -81,12 +81,3 @@ bool tnum_in(struct tnum a, struct tnum b);
 int tnum_strn(char *str, size_t size, struct tnum a);
 /* Format a tnum as tristate binary expansion */
 int tnum_sbin(char *str, size_t size, struct tnum a);
-
-struct tnum tnum_subreg(struct tnum a);
-struct tnum tnum_clear_subreg(struct tnum a);
-struct tnum tnum_const_subreg(struct tnum a, u32 value);
-
-static inline bool tnum_subreg_is_const(struct tnum a)
-{
-	return !tnum_subreg(a).mask;
-}

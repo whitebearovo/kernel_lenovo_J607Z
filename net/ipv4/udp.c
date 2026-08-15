@@ -1032,8 +1032,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		rcu_read_unlock();
 	}
 
-	if (cgroup_bpf_enabled(BPF_CGROUP_UDP4_SENDMSG) &&
-	    !connected) {
+	if (cgroup_bpf_enabled && !connected) {
 		err = BPF_CGROUP_RUN_PROG_UDP4_SENDMSG_LOCK(sk,
 					    (struct sockaddr *)usin, &ipc.addr);
 		if (err)
@@ -1755,7 +1754,7 @@ try_again:
 		memset(sin->sin_zero, 0, sizeof(sin->sin_zero));
 		*addr_len = sizeof(*sin);
 
-		if (cgroup_bpf_enabled(BPF_CGROUP_UDP4_RECVMSG))
+		if (cgroup_bpf_enabled)
 			BPF_CGROUP_RUN_PROG_UDP4_RECVMSG_LOCK(sk,
 							(struct sockaddr *)sin);
 	}

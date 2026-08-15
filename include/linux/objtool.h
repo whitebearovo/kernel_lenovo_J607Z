@@ -1,4 +1,0 @@
-#ifndef _LINUX_OBJTOOL_H
-#define _LINUX_OBJTOOL_H
-#define ANNOTATE_INTRA_FUNCTION_CALL
-#endif

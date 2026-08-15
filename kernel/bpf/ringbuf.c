@@ -8,7 +8,6 @@
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include <linux/poll.h>
-#include <linux/kmemleak.h>
 #include <uapi/linux/btf.h>
 
 #define RINGBUF_CREATE_FLAG_MASK (BPF_F_NUMA_NODE)
@@ -41,17 +40,15 @@ struct bpf_ringbuf {
 	 * mapping consumer page as r/w, but restrict producer page to r/o.
 	 * This protects producer position from being modified by user-space
 	 * application and ruining in-kernel position tracking.
-	 * Note that the pending counter is placed in the same
-	 * page as the producer, so that it shares the same cache line.
 	 */
 	unsigned long consumer_pos __aligned(PAGE_SIZE);
 	unsigned long producer_pos __aligned(PAGE_SIZE);
-	unsigned long pending_pos;
 	char data[] __aligned(PAGE_SIZE);
 };
 
 struct bpf_ringbuf_map {
 	struct bpf_map map;
+	struct bpf_map_memory memory;
 	struct bpf_ringbuf *rb;
 };
 
@@ -63,8 +60,8 @@ struct bpf_ringbuf_hdr {
 
 static struct bpf_ringbuf *bpf_ringbuf_area_alloc(size_t data_sz, int numa_node)
 {
-	const gfp_t flags = GFP_KERNEL_ACCOUNT | __GFP_RETRY_MAYFAIL |
-			    __GFP_NOWARN | __GFP_ZERO;
+	const gfp_t flags = GFP_KERNEL | __GFP_RETRY_MAYFAIL | __GFP_NOWARN |
+			    __GFP_ZERO;
 	int nr_meta_pages = RINGBUF_PGOFF + RINGBUF_POS_PAGES;
 	int nr_data_pages = data_sz >> PAGE_SHIFT;
 	int nr_pages = nr_meta_pages + nr_data_pages;
@@ -91,7 +88,10 @@ static struct bpf_ringbuf *bpf_ringbuf_area_alloc(size_t data_sz, int numa_node)
 	 * user-space implementations significantly.
 	 */
 	array_size = (nr_meta_pages + 2 * nr_data_pages) * sizeof(*pages);
-	pages = bpf_map_area_alloc(array_size, numa_node);
+	if (array_size > PAGE_SIZE)
+		pages = vmalloc_node(array_size, numa_node);
+	else
+		pages = kmalloc_node(array_size, flags, numa_node);
 	if (!pages)
 		return NULL;
 
@@ -107,9 +107,8 @@ static struct bpf_ringbuf *bpf_ringbuf_area_alloc(size_t data_sz, int numa_node)
 	}
 
 	rb = vmap(pages, nr_meta_pages + 2 * nr_data_pages,
-		  VM_MAP | VM_USERMAP, PAGE_KERNEL);
+		  VM_ALLOC | VM_USERMAP, PAGE_KERNEL);
 	if (rb) {
-		kmemleak_not_leak(pages);
 		rb->pages = pages;
 		rb->nr_pages = nr_pages;
 		return rb;
@@ -133,9 +132,18 @@ static struct bpf_ringbuf *bpf_ringbuf_alloc(size_t data_sz, int numa_node)
 {
 	struct bpf_ringbuf *rb;
 
+	if (!data_sz || !PAGE_ALIGNED(data_sz))
+		return ERR_PTR(-EINVAL);
+
+#ifdef CONFIG_64BIT
+	/* on 32-bit arch, it's impossible to overflow record's hdr->pgoff */
+	if (data_sz > RINGBUF_MAX_DATA_SZ)
+		return ERR_PTR(-E2BIG);
+#endif
+
 	rb = bpf_ringbuf_area_alloc(data_sz, numa_node);
 	if (!rb)
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 
 	spin_lock_init(&rb->spinlock);
 	init_waitqueue_head(&rb->waitq);
@@ -144,7 +152,6 @@ static struct bpf_ringbuf *bpf_ringbuf_alloc(size_t data_sz, int numa_node)
 	rb->mask = data_sz - 1;
 	rb->consumer_pos = 0;
 	rb->producer_pos = 0;
-	rb->pending_pos = 0;
 
 	return rb;
 }
@@ -152,34 +159,42 @@ static struct bpf_ringbuf *bpf_ringbuf_alloc(size_t data_sz, int numa_node)
 static struct bpf_map *ringbuf_map_alloc(union bpf_attr *attr)
 {
 	struct bpf_ringbuf_map *rb_map;
+	u64 cost;
+	int err;
 
 	if (attr->map_flags & ~RINGBUF_CREATE_FLAG_MASK)
 		return ERR_PTR(-EINVAL);
 
 	if (attr->key_size || attr->value_size ||
-	    !is_power_of_2(attr->max_entries) ||
-	    !PAGE_ALIGNED(attr->max_entries))
+	    attr->max_entries == 0 || !PAGE_ALIGNED(attr->max_entries))
 		return ERR_PTR(-EINVAL);
 
-#ifdef CONFIG_64BIT
-	/* on 32-bit arch, it's impossible to overflow record's hdr->pgoff */
-	if (attr->max_entries > RINGBUF_MAX_DATA_SZ)
-		return ERR_PTR(-E2BIG);
-#endif
-
-	rb_map = kzalloc(sizeof(*rb_map), GFP_USER | __GFP_ACCOUNT);
+	rb_map = kzalloc(sizeof(*rb_map), GFP_USER);
 	if (!rb_map)
 		return ERR_PTR(-ENOMEM);
 
 	bpf_map_init_from_attr(&rb_map->map, attr);
 
+	cost = sizeof(struct bpf_ringbuf_map) +
+	       sizeof(struct bpf_ringbuf) +
+	       attr->max_entries;
+	err = bpf_map_charge_init(&rb_map->map.memory, cost);
+	if (err)
+		goto err_free_map;
+
 	rb_map->rb = bpf_ringbuf_alloc(attr->max_entries, rb_map->map.numa_node);
-	if (!rb_map->rb) {
-		kfree(rb_map);
-		return ERR_PTR(-ENOMEM);
+	if (IS_ERR(rb_map->rb)) {
+		err = PTR_ERR(rb_map->rb);
+		goto err_uncharge;
 	}
 
 	return &rb_map->map;
+
+err_uncharge:
+	bpf_map_charge_finish(&rb_map->map.memory);
+err_free_map:
+	kfree(rb_map);
+	return ERR_PTR(err);
 }
 
 static void bpf_ringbuf_free(struct bpf_ringbuf *rb)
@@ -199,6 +214,13 @@ static void bpf_ringbuf_free(struct bpf_ringbuf *rb)
 static void ringbuf_map_free(struct bpf_map *map)
 {
 	struct bpf_ringbuf_map *rb_map;
+
+	/* at this point bpf_prog->aux->refcnt == 0 and this map->refcnt == 0,
+	 * so the programs (can be more than one that used this map) were
+	 * disconnected from events. Wait for outstanding critical sections in
+	 * these programs to complete
+	 */
+	synchronize_rcu();
 
 	rb_map = container_of(map, struct bpf_ringbuf_map, map);
 	bpf_ringbuf_free(rb_map->rb);
@@ -227,20 +249,25 @@ static int ringbuf_map_get_next_key(struct bpf_map *map, void *key,
 	return -ENOTSUPP;
 }
 
+static size_t bpf_ringbuf_mmap_page_cnt(const struct bpf_ringbuf *rb)
+{
+	size_t data_pages = (rb->mask + 1) >> PAGE_SHIFT;
+
+	/* consumer page + producer page + 2 x data pages */
+	return RINGBUF_POS_PAGES + 2 * data_pages;
+}
+
 static int ringbuf_map_mmap(struct bpf_map *map, struct vm_area_struct *vma)
 {
 	struct bpf_ringbuf_map *rb_map;
+	size_t mmap_sz;
 
 	rb_map = container_of(map, struct bpf_ringbuf_map, map);
+	mmap_sz = bpf_ringbuf_mmap_page_cnt(rb_map->rb) << PAGE_SHIFT;
 
-	if (vma->vm_flags & VM_WRITE) {
-		/* allow writable mapping for the consumer_pos only */
-		if (vma->vm_pgoff != 0 || vma->vm_end - vma->vm_start != PAGE_SIZE)
-			return -EPERM;
-	} else {
-		vma->vm_flags &= ~VM_MAYWRITE;
-	}
-	/* remap_vmalloc_range() checks size and offset constraints */
+	if (vma->vm_pgoff * PAGE_SIZE + (vma->vm_end - vma->vm_start) > mmap_sz)
+		return -EINVAL;
+
 	return remap_vmalloc_range(vma, rb_map->rb,
 				   vma->vm_pgoff + RINGBUF_PGOFF);
 }
@@ -267,9 +294,7 @@ static __poll_t ringbuf_map_poll(struct bpf_map *map, struct file *filp,
 	return 0;
 }
 
-static int ringbuf_map_btf_id;
 const struct bpf_map_ops ringbuf_map_ops = {
-	.map_meta_equal = bpf_map_meta_equal,
 	.map_alloc = ringbuf_map_alloc,
 	.map_free = ringbuf_map_free,
 	.map_mmap = ringbuf_map_mmap,
@@ -278,8 +303,6 @@ const struct bpf_map_ops ringbuf_map_ops = {
 	.map_update_elem = ringbuf_map_update_elem,
 	.map_delete_elem = ringbuf_map_delete_elem,
 	.map_get_next_key = ringbuf_map_get_next_key,
-	.map_btf_name = "bpf_ringbuf_map",
-	.map_btf_id = &ringbuf_map_btf_id,
 };
 
 /* Given pointer to ring buffer record metadata and struct bpf_ringbuf itself,
@@ -308,17 +331,14 @@ bpf_ringbuf_restore_from_rec(struct bpf_ringbuf_hdr *hdr)
 
 static void *__bpf_ringbuf_reserve(struct bpf_ringbuf *rb, u64 size)
 {
-	unsigned long cons_pos, prod_pos, new_prod_pos, pend_pos, flags;
+	unsigned long cons_pos, prod_pos, new_prod_pos, flags;
+	u32 len, pg_off;
 	struct bpf_ringbuf_hdr *hdr;
-	u32 len, pg_off, tmp_size, hdr_len;
 
 	if (unlikely(size > RINGBUF_MAX_RECORD_SZ))
 		return NULL;
 
 	len = round_up(size + BPF_RINGBUF_HDR_SZ, 8);
-	if (len > rb->mask + 1)
-		return NULL;
-
 	cons_pos = smp_load_acquire(&rb->consumer_pos);
 
 	if (in_nmi()) {
@@ -328,29 +348,13 @@ static void *__bpf_ringbuf_reserve(struct bpf_ringbuf *rb, u64 size)
 		spin_lock_irqsave(&rb->spinlock, flags);
 	}
 
-	pend_pos = rb->pending_pos;
 	prod_pos = rb->producer_pos;
 	new_prod_pos = prod_pos + len;
 
-	while (pend_pos < prod_pos) {
-		hdr = (void *)rb->data + (pend_pos & rb->mask);
-		hdr_len = READ_ONCE(hdr->len);
-		if (hdr_len & BPF_RINGBUF_BUSY_BIT)
-			break;
-		tmp_size = hdr_len & ~BPF_RINGBUF_DISCARD_BIT;
-		tmp_size = round_up(tmp_size + BPF_RINGBUF_HDR_SZ, 8);
-		pend_pos += tmp_size;
-	}
-	rb->pending_pos = pend_pos;
-
-	/* check for out of ringbuf space:
-	 * - by ensuring producer position doesn't advance more than
-	 *   (ringbuf_size - 1) ahead
-	 * - by ensuring oldest not yet committed record until newest
-	 *   record does not span more than (ringbuf_size - 1)
+	/* check for out of ringbuf space by ensuring producer position
+	 * doesn't advance more than (ringbuf_size - 1) ahead
 	 */
-	if (new_prod_pos - cons_pos > rb->mask ||
-	    new_prod_pos - pend_pos > rb->mask) {
+	if (new_prod_pos - cons_pos > rb->mask) {
 		spin_unlock_irqrestore(&rb->spinlock, flags);
 		return NULL;
 	}

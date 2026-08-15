@@ -9308,8 +9308,6 @@ void free_netdev(struct net_device *dev)
 
 	free_percpu(dev->pcpu_refcnt);
 	dev->pcpu_refcnt = NULL;
-	free_percpu(dev->xdp_bulkq);
-	dev->xdp_bulkq = NULL;
 
 	/*  Compatibility with error handling in drivers */
 	if (dev->reg_state == NETREG_UNINITIALIZED) {
@@ -9949,7 +9947,3 @@ out:
 }
 
 subsys_initcall(net_dev_init);
-int bpf_xdp_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
-{
-	return -EOPNOTSUPP;
-}

@@ -40,7 +40,12 @@ static struct bpf_map *xsk_map_alloc(union bpf_attr *attr)
 	if (cost >= U32_MAX - PAGE_SIZE)
 		goto free_m;
 
+	m->map.pages = round_up(cost, PAGE_SIZE) >> PAGE_SHIFT;
 
+	/* Notice returns -EPERM on if map size is larger than memlock limit */
+	err = bpf_map_precharge_memlock(m->map.pages);
+	if (err)
+		goto free_m;
 
 	err = -ENOMEM;
 

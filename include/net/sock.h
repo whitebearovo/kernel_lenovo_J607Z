@@ -536,10 +536,6 @@ enum sk_pacing {
 	SK_PACING_FQ		= 2,
 };
 
-#define SK_USER_DATA_NOCOPY 1UL
-#define SK_USER_DATA_BPF    2UL
-#define SK_USER_DATA_PTRMASK ~(SK_USER_DATA_NOCOPY | SK_USER_DATA_BPF)
-
 #define __sk_user_data(sk) ((*((void __rcu **)&(sk)->sk_user_data)))
 
 #define rcu_dereference_sk_user_data(sk)	rcu_dereference(__sk_user_data((sk)))

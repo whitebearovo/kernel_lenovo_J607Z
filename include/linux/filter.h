@@ -62,7 +62,6 @@ struct ctl_table_header;
 
 /* unused opcode to mark special call to bpf_tail_call() helper */
 #define BPF_TAIL_CALL	0xf0
-#define BPF_PROBE_MEM	0x20
 
 /* unused opcode to mark call to interpreter with arguments */
 #define BPF_CALL_ARGS	0xe0
@@ -291,29 +290,12 @@ struct ctl_table_header;
 
 /* Conditional jumps against registers, if (dst_reg 'op' src_reg) goto pc + off16 */
 
-/* Explicit zero extension of a 32-bit register. */
-#define BPF_ZEXT_REG(DST) \
-	((struct bpf_insn) { \
-		.code  = BPF_ALU | BPF_MOV | BPF_X, \
-		.dst_reg = DST, \
-		.src_reg = DST, \
-		.off   = 0, \
-		.imm   = 1 })
-
 #define BPF_JMP_REG(OP, DST, SRC, OFF)				\
 	((struct bpf_insn) {					\
 		.code  = BPF_JMP | BPF_OP(OP) | BPF_X,		\
 		.dst_reg = DST,					\
 		.src_reg = SRC,					\
 		.off   = OFF,					\
-		.imm   = 0 })
-
-#define BPF_JMP32_REG(OP, DST, SRC, OFF)\
-	((struct bpf_insn) {\
-		.code  = BPF_JMP32 | BPF_OP(OP) | BPF_X,\
-		.dst_reg = DST,\
-		.src_reg = SRC,\
-		.off   = OFF,\
 		.imm   = 0 })
 
 /* Conditional jumps against immediates, if (dst_reg 'op' imm32) goto pc + off16 */
@@ -500,11 +482,6 @@ struct ctl_table_header;
 #define BPF_CALL_4(name, ...)	BPF_CALL_x(4, name, __VA_ARGS__)
 #define BPF_CALL_5(name, ...)	BPF_CALL_x(5, name, __VA_ARGS__)
 
-/* Newer BPF helpers use this spelling; 4.19 has one call wrapper. */
-#ifndef NOTRACE_BPF_CALL_1
-#define NOTRACE_BPF_CALL_1(name, ...) BPF_CALL_1(name, __VA_ARGS__)
-#endif
-
 #define bpf_ctx_range(TYPE, MEMBER)						\
 	offsetof(TYPE, MEMBER) ... offsetofend(TYPE, MEMBER) - 1
 #define bpf_ctx_range_till(TYPE, MEMBER1, MEMBER2)				\
@@ -539,7 +516,6 @@ struct sock_fprog_kern {
 };
 
 #define BPF_BINARY_HEADER_MAGIC	0x05de0e82
-#define BPF_IMAGE_ALIGNMENT 8
 
 struct bpf_binary_header {
 #ifdef CONFIG_CFI_CLANG
@@ -549,13 +525,6 @@ struct bpf_binary_header {
 	/* Some arches need word alignment for their instructions */
 	u8 image[] __aligned(4);
 };
-
-struct bpf_prog_stats {
-	u64 cnt;
-	u64 nsecs;
-	u64 misses;
-	struct u64_stats_sync syncp;
-} __aligned(2 * sizeof(u64));
 
 struct bpf_prog {
 	u16			pages;		/* Number of allocated pages */
@@ -568,16 +537,12 @@ struct bpf_prog {
 				blinded:1,	/* Was blinded */
 				is_func:1,	/* program is a bpf function */
 				kprobe_override:1, /* Do we override a kprobe? */
-				has_callchain_buf:1, /* callchain buffer allocated? */
-				enforce_expected_attach_type:1,
-				call_get_stack:1;
+				has_callchain_buf:1; /* callchain buffer allocated? */
 	enum bpf_prog_type	type;		/* Type of BPF program */
 	enum bpf_attach_type	expected_attach_type; /* For some prog types */
 	u32			len;		/* Number of filter blocks */
 	u32			jited_len;	/* Size of jited insns in bytes */
 	u8			tag[BPF_TAG_SIZE];
-	struct bpf_prog_stats __percpu *stats;
-	int __percpu		*active;
 	struct bpf_prog_aux	*aux;		/* Auxiliary fields */
 	struct sock_fprog_kern	*orig_prog;	/* Original BPF program */
 	unsigned int		(*bpf_func)(const void *ctx,
@@ -650,7 +615,6 @@ static inline void bpf_jit_set_header_magic(struct bpf_binary_header *hdr)
 }
 #endif
 
-DECLARE_STATIC_KEY_FALSE(bpf_stats_enabled_key);
 #define BPF_PROG_RUN(filter, ctx)  bpf_call_func(filter, ctx)
 
 #define BPF_SKB_CB_LEN QDISC_CB_PRIV_LEN
@@ -690,21 +654,6 @@ static inline void bpf_compute_data_pointers(struct sk_buff *skb)
 	cb->data_end  = skb->data + skb_headlen(skb);
 }
 
-static inline void bpf_compute_and_save_data_end(struct sk_buff *skb, void **saved_data_end)
-{
-	struct bpf_skb_data_end *cb = (struct bpf_skb_data_end *)skb->cb;
-
-	*saved_data_end = cb->data_end;
-	cb->data_end = skb->data + skb_headlen(skb);
-}
-
-static inline void bpf_restore_data_end(struct sk_buff *skb, void *saved_data_end)
-{
-	struct bpf_skb_data_end *cb = (struct bpf_skb_data_end *)skb->cb;
-
-	cb->data_end = saved_data_end;
-}
-
 static inline u8 *bpf_skb_cb(struct sk_buff *skb)
 {
 	/* eBPF programs may read/write skb->cb[] area to transfer meta
@@ -724,7 +673,7 @@ static inline u8 *bpf_skb_cb(struct sk_buff *skb)
 	return qdisc_skb_cb(skb)->data;
 }
 
-static inline u32 __bpf_prog_run_save_cb(const struct bpf_prog *prog,
+static inline u32 bpf_prog_run_save_cb(const struct bpf_prog *prog,
 				       struct sk_buff *skb)
 {
 	u8 *cb_data = bpf_skb_cb(skb);
@@ -742,11 +691,6 @@ static inline u32 __bpf_prog_run_save_cb(const struct bpf_prog *prog,
 		memcpy(cb_data, cb_saved, sizeof(cb_saved));
 
 	return res;
-}
-
-static inline u32 bpf_prog_run_save_cb(const struct bpf_prog *prog, struct sk_buff *skb)
-{
-	return __bpf_prog_run_save_cb(prog, skb);
 }
 
 static inline u32 bpf_prog_run_clear_cb(const struct bpf_prog *prog,
@@ -813,17 +757,6 @@ static inline bool
 bpf_ctx_narrow_access_ok(u32 off, u32 size, u32 size_default)
 {
 	return size <= size_default && (size & (size - 1)) == 0;
-}
-
-static inline u8
-bpf_ctx_narrow_access_offset(u32 off, u32 size, u32 size_default)
-{
-	u8 access_off = off & (size_default - 1);
-#ifdef __LITTLE_ENDIAN
-	return access_off;
-#else
-	return size_default - (access_off + size);
-#endif
 }
 
 #define bpf_classic_proglen(fprog) (fprog->len * sizeof(fprog->filter[0]))
@@ -914,9 +847,7 @@ u64 __bpf_call_base(u64 r1, u64 r2, u64 r3, u64 r4, u64 r5);
 	((u64 (*)(u64, u64, u64, u64, u64, const struct bpf_insn *)) \
 	 (void *)__bpf_call_base)
 
-struct bpf_prog *bpf_prog_alloc_no_stats(unsigned int size, gfp_t gfp_extra_flags);
 struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog);
-bool bpf_jit_needs_zext(void);
 void bpf_jit_compile(struct bpf_prog *prog);
 bool bpf_helper_changes_pkt_data(void *func);
 
@@ -928,7 +859,6 @@ static inline bool bpf_dump_raw_ok(const struct cred *cred)
 	return kallsyms_show_value(cred);
 }
 
-int bpf_remove_insns(struct bpf_prog *prog, u32 off, u32 cnt);
 struct bpf_prog *bpf_patch_insn_single(struct bpf_prog *prog, u32 off,
 				       const struct bpf_insn *patch, u32 len);
 
@@ -1017,7 +947,6 @@ void bpf_jit_binary_free(struct bpf_binary_header *hdr);
 u64 bpf_jit_alloc_exec_limit(void);
 void *bpf_jit_alloc_exec(unsigned long size);
 void bpf_jit_free_exec(void *addr);
-int bpf_jit_add_poke_descriptor(struct bpf_prog *prog, struct bpf_jit_poke_descriptor *poke);
 void bpf_jit_free(struct bpf_prog *fp);
 
 struct bpf_prog *bpf_jit_blind_constants(struct bpf_prog *fp);
@@ -1162,6 +1091,7 @@ static inline void bpf_prog_kallsyms_del(struct bpf_prog *fp)
 }
 #endif /* CONFIG_BPF_JIT */
 
+void bpf_prog_kallsyms_del_subprogs(struct bpf_prog *fp);
 void bpf_prog_kallsyms_del_all(struct bpf_prog *fp);
 
 #define BPF_ANC		BIT(15)
@@ -1270,19 +1200,7 @@ struct bpf_sock_ops_kern {
 struct bpf_sysctl_kern {
 	struct ctl_table_header *head;
 	struct ctl_table *table;
-	void *cur_val;
-	size_t cur_len;
-	void *new_val;
-	size_t new_len;
-	int new_updated;
 	int write;
-	loff_t *ppos;
-	u64 tmp_reg;
-};
-
-#define BPF_SOCKOPT_KERN_BUF_SIZE 32
-struct bpf_sockopt_buf {
-	u8 data[BPF_SOCKOPT_KERN_BUF_SIZE];
 };
 
 struct bpf_sockopt_kern {
