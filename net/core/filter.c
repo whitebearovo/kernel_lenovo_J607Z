@@ -61,6 +61,7 @@
 #include <net/xfrm.h>
 #include <linux/bpf_trace.h>
 #include <net/xdp_sock.h>
+#include <linux/btf_ids.h>
 #include <linux/inetdevice.h>
 #include <net/ip_fib.h>
 #include <net/flow.h>
@@ -256,17 +257,6 @@ BPF_CALL_2(bpf_skb_load_helper_32_no_cache, const struct sk_buff *, skb,
 	return ____bpf_skb_load_helper_32(skb, skb->data, skb->len - skb->data_len,
 					  offset);
 }
-
-BPF_CALL_0(bpf_get_raw_cpu_id)
-{
-	return raw_smp_processor_id();
-}
-
-static const struct bpf_func_proto bpf_get_raw_smp_processor_id_proto = {
-	.func		= bpf_get_raw_cpu_id,
-	.gpl_only	= false,
-	.ret_type	= RET_INTEGER,
-};
 
 static u32 convert_skb_access(int skb_field, int dst_reg, int src_reg,
 			      struct bpf_insn *insn_buf)
@@ -3087,13 +3077,13 @@ static int __bpf_tx_xdp_map(struct net_device *dev_rx, void *fwd,
 	int err;
 
 	switch (map->map_type) {
-	case BPF_MAP_TYPE_DEVMAP: {
+	case BPF_MAP_TYPE_DEVMAP:
+	case BPF_MAP_TYPE_DEVMAP_HASH: {
 		struct bpf_dtab_netdev *dst = fwd;
 
 		err = dev_map_enqueue(dst, xdp, dev_rx);
 		if (err)
 			return err;
-		__dev_map_insert_ctx(map, index);
 		break;
 	}
 	case BPF_MAP_TYPE_CPUMAP: {
@@ -3102,7 +3092,6 @@ static int __bpf_tx_xdp_map(struct net_device *dev_rx, void *fwd,
 		err = cpu_map_enqueue(rcpu, xdp, dev_rx);
 		if (err)
 			return err;
-		__cpu_map_insert_ctx(map, index);
 		break;
 	}
 	case BPF_MAP_TYPE_XSKMAP: {
@@ -3119,25 +3108,15 @@ static int __bpf_tx_xdp_map(struct net_device *dev_rx, void *fwd,
 
 void xdp_do_flush_map(void)
 {
-	struct bpf_redirect_info *ri = this_cpu_ptr(&bpf_redirect_info);
-	struct bpf_map *map = ri->map_to_flush;
+        struct bpf_redirect_info *ri = this_cpu_ptr(&bpf_redirect_info);
+        struct bpf_map *map = ri->map_to_flush;
 
-	ri->map_to_flush = NULL;
-	if (map) {
-		switch (map->map_type) {
-		case BPF_MAP_TYPE_DEVMAP:
-			__dev_map_flush(map);
-			break;
-		case BPF_MAP_TYPE_CPUMAP:
-			__cpu_map_flush(map);
-			break;
-		case BPF_MAP_TYPE_XSKMAP:
-			__xsk_map_flush(map);
-			break;
-		default:
-			break;
-		}
-	}
+        __dev_flush();
+        __cpu_map_flush();
+
+        ri->map_to_flush = NULL;
+        if (map && map->map_type == BPF_MAP_TYPE_XSKMAP)
+                __xsk_map_flush(map);
 }
 EXPORT_SYMBOL_GPL(xdp_do_flush_map);
 
@@ -5067,55 +5046,6 @@ bool bpf_helper_changes_pkt_data(void *func)
 		return true;
 
 	return false;
-}
-
-static const struct bpf_func_proto *
-bpf_base_func_proto(enum bpf_func_id func_id)
-{
-	switch (func_id) {
-	case BPF_FUNC_map_lookup_elem:
-		return &bpf_map_lookup_elem_proto;
-	case BPF_FUNC_map_update_elem:
-		return &bpf_map_update_elem_proto;
-	case BPF_FUNC_map_delete_elem:
-		return &bpf_map_delete_elem_proto;
-	case BPF_FUNC_get_prandom_u32:
-		return &bpf_get_prandom_u32_proto;
-	case BPF_FUNC_get_smp_processor_id:
-		return &bpf_get_raw_smp_processor_id_proto;
-	case BPF_FUNC_get_numa_node_id:
-		return &bpf_get_numa_node_id_proto;
-	case BPF_FUNC_tail_call:
-		return &bpf_tail_call_proto;
-	case BPF_FUNC_ktime_get_ns:
-		return &bpf_ktime_get_ns_proto;
-	case BPF_FUNC_ktime_get_boot_ns:
-		return &bpf_ktime_get_boot_ns_proto;
-	case BPF_FUNC_ringbuf_output:
-		return &bpf_ringbuf_output_proto;
-	case BPF_FUNC_ringbuf_reserve:
-		return &bpf_ringbuf_reserve_proto;
-	case BPF_FUNC_ringbuf_submit:
-		return &bpf_ringbuf_submit_proto;
-	case BPF_FUNC_ringbuf_discard:
-		return &bpf_ringbuf_discard_proto;
-	case BPF_FUNC_ringbuf_query:
-		return &bpf_ringbuf_query_proto;
-	default:
-		break;
-	}
-	if (!capable(CAP_SYS_ADMIN))
-		return NULL;
-	switch (func_id) {
-	case BPF_FUNC_spin_lock:
-		return &bpf_spin_lock_proto;
-	case BPF_FUNC_spin_unlock:
-		return &bpf_spin_unlock_proto;
-	case BPF_FUNC_trace_printk:
-		return bpf_get_trace_printk_proto();
-	default:
-		return NULL;
-	}
 }
 
 static const struct bpf_func_proto *
@@ -7478,16 +7408,6 @@ out:
 }
 
 #ifdef CONFIG_INET
-struct sk_reuseport_kern {
-	struct sk_buff *skb;
-	struct sock *sk;
-	struct sock *selected_sk;
-	void *data_end;
-	u32 hash;
-	u32 reuseport_id;
-	bool bind_inany;
-};
-
 static void bpf_init_reuseport_kern(struct sk_reuseport_kern *reuse_kern,
 				    struct sock_reuseport *reuse,
 				    struct sock *sk, struct sk_buff *skb,
@@ -7743,4 +7663,24 @@ const struct bpf_verifier_ops sk_reuseport_verifier_ops = {
 
 const struct bpf_prog_ops sk_reuseport_prog_ops = {
 };
+bool bpf_xdp_sock_is_valid_access(int off, int size, enum bpf_access_type type,
+                                  struct bpf_insn_access_aux *info)
+{
+	return type == BPF_READ && off == 0 && size == sizeof(__u32);
+}
+
+u32 bpf_xdp_sock_convert_ctx_access(enum bpf_access_type type,
+                                    const struct bpf_insn *si,
+                                    struct bpf_insn *insn_buf,
+                                    struct bpf_prog *prog, u32 *target_size)
+{
+	insn_buf[0] = BPF_LDX_MEM(BPF_H, si->dst_reg, si->src_reg,
+			      offsetof(struct xdp_sock, queue_id));
+	return 1;
+}
+
+#ifndef CONFIG_DEBUG_INFO_BTF
+u32 btf_sock_ids[MAX_BTF_SOCK_TYPE];
+#endif
+
 #endif /* CONFIG_INET */
